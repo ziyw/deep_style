@@ -1,4 +1,4 @@
-name: "VGG_ILSVRC_19_layers"
+name: "Style_model"
 input: "data"
 input_dim: 1
 input_dim: 3
