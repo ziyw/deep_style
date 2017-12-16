@@ -75,20 +75,23 @@ class StyleModel(object):
     
 
   def transfer(self, content, styles):
-    # Load images 
-    self.content = self.load_image(content).type(torch.FloatTensor)
-    self.style = self.load_image(style).type(torch.FloatTensor)
-
     if self.style_num == 1:
-        self.single_combine()
-        self.show_single_combine()
+      self.content = self.load_image(content).type(torch.FloatTensor)
+      self.style = self.load_image(styles).type(torch.FloatTensor)
+      
+      self.single_combine()
+      self.show_single_combine()
 
     else:
-        self.multi_combine()
+      self.style_1_layers = self.style_layers
+      self.style_2_layers = self.style_layers
 
-
-
-
+      self.content = self.load_image(content).type(torch.FloatTensor)
+      self.style_1 = self.load_image(styles[0]).type(torch.FloatTensor)
+      self.style_2 = self.load_image(styles[1]).type(torch.FloatTensor)
+      
+      self.multi_combine()
+      self.show_multi_combine()
 
   def load_image(self,filename,size=200):
     loader = transforms.Compose([
@@ -98,6 +101,7 @@ class StyleModel(object):
     image = Image.open(filename)
     image = Variable(loader(image))
     image = image.unsqueeze(0)
+
     return image
 
   def unload_tensor(self, tensor,size=200):
@@ -107,19 +111,7 @@ class StyleModel(object):
     image = unloader(image)
     return image
   
-  def show_single_combine(self):
-    fig = plt.figure()
-    
-    plt.subplot(131)
-    plt.imshow(self.unload_tensor(self.content.data))
 
-    plt.subplot(132)
-    plt.imshow(self.unload_tensor(self.style.data))
-
-    plt.subplot(133)
-    plt.imshow(self.unload_tensor(self.result.data))
-
-    plt.show()
 
   def single_combine(self):
     self.build_single_style_model()
@@ -210,17 +202,152 @@ class StyleModel(object):
 
     input.data.clamp_(0, 1)
     self.result = input 
+  
+  def show_single_combine(self):
+    fig = plt.figure()
+    
+    plt.subplot(131)
+    plt.imshow(self.unload_tensor(self.content.data))
+
+    plt.subplot(132)
+    plt.imshow(self.unload_tensor(self.style.data))
+
+    plt.subplot(133)
+    plt.imshow(self.unload_tensor(self.result.data))
+
+    plt.show()
+
+
+  # Multiple combination 
+  def multi_combine(self):
+    self.build_multi_style_model()
+    self.train_multi_model()
+
+  def build_multi_style_model(self):
+    content = self.content.clone()
+    style_1 = self.style_1.clone()
+    style_2 = self.style_2.clone()
+
+    cnn = models.vgg19(pretrained=True).features
+
+    self.content_losses = []
+    self.style_1_losses = []
+    self.style_2_losses = []
+
+    model = nn.Sequential()  # the new Sequential module network
+    gram = GramMatrix()  # we need a gram module in order to compute style targets
+
+    i = 1
+    for layer in list(cnn):
+        if isinstance(layer, nn.Conv2d):
+            name = "conv_" + str(i)
+            model.add_module(name, layer)
+
+            if name in self.content_layers:
+                # add content loss:
+                target = model.forward(content).clone()
+                content_loss = ContentLoss(target, self.content_weight)
+                model.add_module("content_loss_" + str(i), content_loss)
+                self.content_losses.append(content_loss)
+            
+            if name in self.style_1_layers:
+                # add style loss:
+                target_feature = model.forward(style_1).clone()
+                target_feature_gram = gram.forward(target_feature)
+                style_loss = StyleLoss(target_feature_gram, self.style_weight)
+                model.add_module("style_loss_" + str(i), style_loss)
+                self.style_1_losses.append(style_loss)
+            
+            if name in self.style_2_layers:
+                # add style loss:
+                target_feature = model.forward(style_2).clone()
+                target_feature_gram = gram.forward(target_feature)
+                style_loss = StyleLoss(target_feature_gram, self.style_weight)
+                model.add_module("style_loss_" + str(i), style_loss)
+                self.style_2_losses.append(style_loss)
+        
+        if isinstance(layer, nn.ReLU):
+            name = "relu_" + str(i)
+            model.add_module(name, layer)
+            i += 1
+
+        if isinstance(layer, nn.MaxPool2d):
+            name = "pool_" + str(i)
+            model.add_module(name, layer)  # ***
+
+    print(model)
+    self.model = model 
+
+
+  def train_multi_model(self):
+    input = self.content.clone()
+    input.data = torch.randn(input.data.size()).type(torch.FloatTensor)
+
+    input = nn.Parameter(input.data)
+    optimizer = optim.LBFGS([input])
+
+    run = [0]
+    while run[0] <= 50:
+
+        def closure():
+
+            input.data.clamp_(0, 1)
+
+            optimizer.zero_grad()
+            self.model.forward(input)
+            
+            style_1_score = 0
+            style_2_score = 0
+
+            content_score = 0
+
+            for sl in self.style_1_losses:
+              style_1_score += sl.backward()
+            
+            for sl in self.style_2_losses:
+              style_2_score += sl.backward()
+
+            for cl in self.content_losses:
+              content_score += cl.backward()
+
+            run[0]+=1
+            if run[0] % 10 == 0:
+              print("Iteration "+str(run[0])+":")
+
+            return content_score+style_1_score+style_2_score
+
+        optimizer.step(closure)
+
+    input.data.clamp_(0, 1)
+    self.result = input  
+
+  def show_multi_combine(self):
+    fig = plt.figure()
+    
+    plt.subplot(221)
+    plt.imshow(self.unload_tensor(self.content.data))
+
+    plt.subplot(222)
+    plt.imshow(self.unload_tensor(self.style_1.data))
+
+    plt.subplot(223)
+    plt.imshow(self.unload_tensor(self.style_2.data))
+    
+    plt.subplot(224)
+    plt.imshow(self.unload_tensor(self.result.data))
+
+    plt.show()
 
 
 if __name__ == '__main__':
   content_layers = ['conv_4']
   style_layers = ['conv_1', 'conv_2', 'conv_3', 'conv_4', 'conv_5']
   
-  content = '../input_image/content.jpg'
-  style = '../input_image/style.jpg'
+  content = '../images/content.jpg'
+  styles = ['../images/style0.jpg', '../images/style1.jpg']
   
-  model = StyleModel(content_layers, style_layers)
-  model.transfer(content, style)
+  model = StyleModel(content_layers, style_layers, style_num=2)
+  model.transfer(content, styles)
 
 
   
